@@ -1,7 +1,6 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 from dataclasses import dataclass
-import hashlib
 import json
 import re
 
@@ -52,6 +51,11 @@ STATUSES = (
     "DRAFT", "EVIDENCE_PENDING", "READY_FOR_ADJUDICATION", "CHANGE_ASSESSED",
     "APPLICABILITY_ASSESSED", "COMPLETED", "PROTOCOL_DEVIATION",
 )
+
+
+def _sha256_hex(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
 
 
 def _fail(prefix, msg):
@@ -108,10 +112,10 @@ class PolicyRec:
     policy_id: str
     name: str
     scope: str
-    owner: Address
+    owner: str
     head_version: str
     version_ids: str
-    version_count: u32
+    version_count: u256
 
 
 @allow_storage
@@ -124,8 +128,8 @@ class VersionRec:
     content_digest: str
     published_at: str
     effective_at: str
-    registrant: Address
-    ordinal: u32
+    registrant: str
+    ordinal: u256
 
 
 @allow_storage
@@ -141,7 +145,7 @@ class EvidenceRec:
     source_published_at: str
     extraction_version: str
     limitations: str
-    submitter: Address
+    submitter: str
 
 
 @allow_storage
@@ -152,7 +156,7 @@ class CaseRec:
     old_version_id: str
     new_version_id: str
     supersedes: str
-    owner: Address
+    owner: str
     event_description: str
     event_timestamp: str
     event_provenance: str
@@ -161,7 +165,7 @@ class CaseRec:
     require_independent_effective_date: bool
     status: str
     evidence_ids: str
-    evidence_count: u32
+    evidence_count: u256
     change_result: str
     change_json: str
     appl_result: str
@@ -197,7 +201,7 @@ def _fetch_verified(url, expected_digest, max_chars):
         _fail(ERR_EXTERNAL, "empty body for " + url)
     if len(body) > MAX_BODY_BYTES:
         _fail(ERR_EXTERNAL, "body too large for " + url)
-    got = hashlib.sha256(body).hexdigest()
+    got = _sha256_hex(body)
     if got != expected_digest:
         _fail(ERR_EXTERNAL, "digest mismatch for " + url)
     text = _strip_markup(body.decode("utf-8", errors="replace"))
@@ -641,38 +645,43 @@ class PolicyShift(gl.Contract):
     versions: TreeMap[str, VersionRec]
     cases: TreeMap[str, CaseRec]
     evidence: TreeMap[str, EvidenceRec]
-    evidence_fingerprints: TreeMap[str, bool]
+    evidence_fingerprints: TreeMap[str, str]
     policy_index: DynArray[str]
     case_index: DynArray[str]
+    version: str
+
+    def __init__(self):
+        self.version = PROTOCOL_VERSION
+
+    def _sender(self) -> str:
+        return str(gl.message.sender_address).lower()
 
     # ---------------- internal helpers ----------------
 
     def _policy(self, policy_id: str):
-        p = self.policies.get(policy_id)
-        if p is None:
+        if policy_id not in self.policies:
             _fail(ERR_EXPECTED, "unknown policy " + policy_id)
-        return p
+        return self.policies[policy_id]
 
     def _version(self, policy_id: str, version_id: str):
-        v = self.versions.get(policy_id + "/" + version_id)
-        if v is None:
-            _fail(ERR_EXPECTED, "unknown version " + policy_id + "/" + version_id)
-        return v
+        key = policy_id + "/" + version_id
+        if key not in self.versions:
+            _fail(ERR_EXPECTED, "unknown version " + key)
+        return self.versions[key]
 
     def _case(self, case_id: str):
-        c = self.cases.get(case_id)
-        if c is None:
+        if case_id not in self.cases:
             _fail(ERR_EXPECTED, "unknown case " + case_id)
-        return c
+        return self.cases[case_id]
 
     def _require_case_owner(self, case):
-        if gl.message.sender_address != case.owner:
+        if self._sender() != str(case.owner):
             _fail(ERR_EXPECTED, "only the case owner may do this")
 
     def _require_actor(self, case):
         pol = self._policy(str(case.policy_id))
-        s = gl.message.sender_address
-        if s != case.owner and s != pol.owner:
+        s = self._sender()
+        if s != str(case.owner) and s != str(pol.owner):
             _fail(ERR_EXPECTED, "only the case owner or policy owner may trigger this")
 
     def _require_status(self, case, status: str):
@@ -717,11 +726,11 @@ class PolicyShift(gl.Contract):
         _check_id(policy_id, "policy_id")
         _check_len(name, "name", 1, 120)
         _check_len(scope, "scope", 1, 400)
-        if self.policies.get(policy_id) is not None:
+        if policy_id in self.policies:
             _fail(ERR_EXPECTED, "policy already exists")
         self.policies[policy_id] = PolicyRec(
             policy_id=policy_id, name=name.strip(), scope=scope.strip(),
-            owner=gl.message.sender_address, head_version="", version_ids="", version_count=u32(0),
+            owner=self._sender(), head_version="", version_ids="", version_count=u256(0),
         )
         self.policy_index.append(policy_id)
 
@@ -731,7 +740,7 @@ class PolicyShift(gl.Contract):
         content_digest: str, published_at: str, effective_at: str,
     ) -> None:
         pol = self._policy(policy_id)
-        if gl.message.sender_address != pol.owner:
+        if self._sender() != str(pol.owner):
             _fail(ERR_EXPECTED, "only the policy owner may register versions")
         _check_id(version_id, "version_id")
         _check_url(source_url, "source_url")
@@ -739,7 +748,7 @@ class PolicyShift(gl.Contract):
         _check_ts(published_at, "published_at")
         _check_ts(effective_at, "effective_at")
         key = policy_id + "/" + version_id
-        if self.versions.get(key) is not None:
+        if key in self.versions:
             _fail(ERR_EXPECTED, "version already exists")
         head = str(pol.head_version)
         if predecessor != head:
@@ -751,11 +760,11 @@ class PolicyShift(gl.Contract):
         self.versions[key] = VersionRec(
             version_id=version_id, policy_id=policy_id, predecessor=predecessor, source_url=source_url,
             content_digest=content_digest, published_at=published_at, effective_at=effective_at,
-            registrant=gl.message.sender_address, ordinal=u32(int(pol.version_count) + 1),
+            registrant=self._sender(), ordinal=u256(int(pol.version_count) + 1),
         )
         pol.version_ids = (str(pol.version_ids) + "," + version_id) if str(pol.version_ids) else version_id
         pol.head_version = version_id
-        pol.version_count = u32(int(pol.version_count) + 1)
+        pol.version_count = u256(int(pol.version_count) + 1)
 
     # ---------------- case lifecycle ----------------
 
@@ -766,7 +775,7 @@ class PolicyShift(gl.Contract):
         criteria_text: str, require_independent_effective_date: bool, supersedes: str,
     ) -> None:
         _check_id(case_id, "case_id")
-        if self.cases.get(case_id) is not None:
+        if case_id in self.cases:
             _fail(ERR_EXPECTED, "case already exists")
         self._policy(policy_id)
         old = self._version(policy_id, old_version_id)
@@ -783,11 +792,11 @@ class PolicyShift(gl.Contract):
                 _fail(ERR_EXPECTED, "superseded case belongs to another policy")
         self.cases[case_id] = CaseRec(
             case_id=case_id, policy_id=policy_id, old_version_id=old_version_id,
-            new_version_id=new_version_id, supersedes=supersedes, owner=gl.message.sender_address,
+            new_version_id=new_version_id, supersedes=supersedes, owner=self._sender(),
             event_description=event_description.strip(), event_timestamp=event_timestamp,
             event_provenance=event_provenance.strip(), criteria_text=criteria_text.strip(),
             criteria_digest="", require_independent_effective_date=require_independent_effective_date,
-            status="DRAFT", evidence_ids="", evidence_count=u32(0),
+            status="DRAFT", evidence_ids="", evidence_count=u256(0),
             change_result="", change_json="", appl_result="", appl_json="",
             comp_result="", comp_json="", deviation_reason="",
         )
@@ -807,7 +816,7 @@ class PolicyShift(gl.Contract):
         case = self._case(case_id)
         self._require_case_owner(case)
         self._require_status(case, "DRAFT")
-        case.criteria_digest = hashlib.sha256(str(case.criteria_text).encode("utf-8")).hexdigest()
+        case.criteria_digest = _sha256_hex(str(case.criteria_text).encode("utf-8"))
         case.status = "EVIDENCE_PENDING"
 
     @gl.public.write
@@ -834,20 +843,20 @@ class PolicyShift(gl.Contract):
         if int(case.evidence_count) >= MAX_EVIDENCE:
             _fail(ERR_EXPECTED, "evidence limit reached")
         key = case_id + "/" + evidence_id
-        if self.evidence.get(key) is not None:
+        if key in self.evidence:
             _fail(ERR_EXPECTED, "evidence id already used")
         fp = case_id + "|" + content_digest + "|" + source_url
-        if self.evidence_fingerprints.get(fp) is not None:
+        if fp in self.evidence_fingerprints:
             _fail(ERR_EXPECTED, "duplicate evidence (same url and digest)")
-        self.evidence_fingerprints[fp] = True
+        self.evidence_fingerprints[fp] = "1"
         self.evidence[key] = EvidenceRec(
             evidence_id=evidence_id, case_id=case_id, kind=kind, source_url=source_url,
             content_digest=content_digest, content_type=content_type.strip(), observed_at=observed_at,
             source_published_at=source_published_at, extraction_version=extraction_version,
-            limitations=limitations.strip(), submitter=gl.message.sender_address,
+            limitations=limitations.strip(), submitter=self._sender(),
         )
         case.evidence_ids = (str(case.evidence_ids) + "," + evidence_id) if str(case.evidence_ids) else evidence_id
-        case.evidence_count = u32(int(case.evidence_count) + 1)
+        case.evidence_count = u256(int(case.evidence_count) + 1)
 
     @gl.public.write
     def mark_ready(self, case_id: str) -> None:
@@ -952,7 +961,7 @@ class PolicyShift(gl.Contract):
             })
         return json.dumps({
             "policy_id": str(p.policy_id), "name": str(p.name), "scope": str(p.scope),
-            "owner": p.owner.as_hex, "head_version": str(p.head_version), "versions": versions,
+            "owner": str(p.owner), "head_version": str(p.head_version), "versions": versions,
         }, sort_keys=True)
 
     def _case_dict(self, case):
@@ -961,7 +970,7 @@ class PolicyShift(gl.Contract):
         return {
             "case_id": str(case.case_id), "policy_id": str(case.policy_id),
             "old_version_id": str(case.old_version_id), "new_version_id": str(case.new_version_id),
-            "supersedes": str(case.supersedes), "owner": case.owner.as_hex,
+            "supersedes": str(case.supersedes), "owner": str(case.owner),
             "event_description": str(case.event_description), "event_timestamp": str(case.event_timestamp),
             "event_provenance": str(case.event_provenance), "criteria_text": str(case.criteria_text),
             "criteria_digest": str(case.criteria_digest),
