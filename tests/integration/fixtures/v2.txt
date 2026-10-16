@@ -1,0 +1,1 @@
+Access Policy v2. Employees must rotate API keys every 30 days. Shared accounts are prohibited for all personnel including contractors. Incidents must be reported within 24 hours. This policy takes effect on 2026-03-01. Events before the effective date remain governed by the previous version.

@@ -1,0 +1,1 @@
+Access Policy v1. Employees must rotate API keys every 90 days. Contractors may use shared accounts for temporary access. Incidents must be reported within 72 hours.
